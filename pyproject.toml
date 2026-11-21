@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pow-51-sim"
+version = "0.1.0"
+description = "Proof-of-work 51% attack (double-spend) simulation"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "seaborn>=0.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.8",
+    "black>=24.0",
+    "mypy>=1.10",
+    "pandas-stubs",
+    "pre-commit>=3.7",
+]
+notebook = [
+    "ipykernel",
+    "nbformat",
+    "nbconvert",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["integration: small end-to-end simulations"]
+
+[tool.coverage.run]
+source = ["pow51sim"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S311"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["matplotlib.*", "seaborn.*"]
+ignore_missing_imports = true
