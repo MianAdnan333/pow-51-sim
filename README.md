@@ -3,7 +3,7 @@
 A simulation of a **51% double-spend attack** on a proof-of-work blockchain, and of a
 defense against it. An attacker pays a victim, secretly mines a competing chain that
 spends the same coin back to itself, and releases it once it is longer. The project
-measures how often that works, and what the defense costs.
+measures how often that works, what the defense stops, and what it costs.
 
 > Educational simulation. It models consensus rules, not a real network or real hashing.
 
@@ -15,189 +15,167 @@ Requires **Python 3.10+**.
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pip install -e ".[dev]"            # add ",notebook" to run the Jupyter notebooks
-pytest --cov                       # 80% coverage gate
+pip install -e ".[dev,notebook]"   # re-run after pulling so new packages are installed
 ```
 
 Optional: `git init` (if this folder is not already its own repo), then
 `pre-commit install` to run **ruff, black and mypy** on every commit.
 
-## 2. Architecture
-
-Lower layers never import the layers above them.
-
-```
- notebooks/, scripts/        analysis only, no logic
-        |
-   analysis/    tables, plots (seaborn/matplotlib), closed-form references
-        |
-  simulation/   AttackScenario, SimulationRunner, Network, FalsePositiveExperiment
-        |
-    miners/     HonestMiner, MaliciousMiner, BlockReceiver
-        |
-   defense/     LongPrivateChainRule, MaxReorgDepthRule, ChainComparator
-        |
-     core/      Block, Transaction, Blockchain, UTXOSet, ConsensusRule + rules
-```
-
-**One attack trial:**
-
-```
- AttackConfig + rules + seeded RNG
-              |
-        AttackScenario
-         /           \
- HonestMiner x N     MaliciousMiner
-  extends the         mines a private fork
-  public chain        (withheld, includes the refund tx)
-         \           /
-   release when: payment has N confirmations
-                 AND private chain is longer
-              |
-        AttackResult
-  success, reorg_depth, orphans, longest streak ...
-```
-
-**Key components**
-
-1. **Blockchain**: a block tree with longest-chain fork choice. Validation is pluggable
-   through `ConsensusRule`, so new rules need no engine changes.
-2. **UTXOSet**: follows the main chain and rolls back on reorgs.
-3. **LongPrivateChainRule**: rejects a block that makes `max_consecutive` (default 6)
-   blocks in a row from one miner. The first rejection switches that chain into
-   **Safe Mode**, where every reorg is checked by the `ChainComparator` and rejected
-   if it re-spends coins differently from the main chain.
-4. **MaxReorgDepthRule**: rejects reorgs deeper than a limit.
-5. **Network**: discrete-event simulation with exponential block arrivals, random
-   propagation delay and a seed for reproducibility.
-
-## 3. Running the scenarios
-
-All examples are seeded, so reruns give identical results.
-
-**A. Single double-spend race** (round-based, defense off vs on)
-
-```python
-from random import Random
-
-from pow51sim.defense.rules import build_rules
-from pow51sim.simulation.config import AttackConfig
-from pow51sim.simulation.scenario import AttackScenario
-
-config = AttackConfig(attacker_share=0.45, confirmations=3, honest_miners=10)
-for label, limit in (("no defense", None), ("defense on", 6)):
-    rules = build_rules(max_reorg_depth=None, max_consecutive=limit)
-    wins = sum(AttackScenario(config, rules, Random(s)).run().success for s in range(200))
-    print(f"{label}: {wins / 200:.0%} success")   # 66% vs 38%
-```
-
-**B. Parameter grid to CSV** (shares 10-60%, confirmations, defense on/off)
-
-```python
-from pow51sim.simulation.simulation_runner import ParameterGrid, SimulationRunner
-
-runner = SimulationRunner(trials=200, seed=42, grid=ParameterGrid(), detailed=True)
-frame = runner.run_to_csv("results/grid_detailed.csv")
-```
-
-Columns: `scenario, attacker_share, attack_success, final_chain_length, reorg_depth,
-max_consecutive_by_one_miner, runtime_ms, memory_mb`. `detailed=True` appends orphan
-and block-ownership counts. The `scenario` label holds the confirmation depth and
-defense setting, e.g. `conf=3,defense=on`.
-
-**C. Discrete-event network** (latency, propagation, withheld fork)
-
-```python
-from pow51sim.defense.rules import build_rules
-from pow51sim.simulation.builders import build_network
-
-net = build_network(
-    malicious_share=0.45, honest_count=10, block_interval=600, mean_latency=2,
-    confirmations=3, seed=1, rules=build_rules(None, max_consecutive=6),
-)
-net.run(until=600 * 300)
-net.drain()                          # stop mining, deliver blocks still in flight
-print(len(net.block_log), net.miners[0].released)
-```
-
-**D. False positives** (honest-only network, large miner vs the run limit)
-
-```python
-from pow51sim.simulation.false_positives import FalsePositiveExperiment
-
-FalsePositiveExperiment(trials=50, seed=42).run_to_csv("results/false_positives.csv")
-```
-
-**E. Notebook and figures**
+## 2. Quick run
 
 ```bash
-jupyter lab notebooks/defense_evaluation.ipynb   # generates the CSVs on first run
-python scripts/generate_figures.py               # rewrites docs/images/*.png
+pytest                                        # tests, 80% coverage gate with --cov
+python -m src.simulation.runner               # grid -> results/results.csv
+streamlit run src/dashboard/app.py            # interactive dashboard
+jupyter notebook notebooks/analysis.ipynb     # charts and conclusions
 ```
 
-`notebooks/attack_analysis.ipynb` shows the aggregated `sweep()` API and compares it
-with the closed-form Nakamoto probability.
+## 3. Architecture
 
-## 4. Sample results
+Each layer only imports the ones below it.
 
-200 trials per grid cell, seed 42, 10 honest miners, defense threshold 6.
+```
+ notebooks/analysis.ipynb      src/dashboard (Streamlit + Plotly)
+            \                     /
+             src/simulation/   runner, attack scenario, plots, false positives
+                      |
+              src/defense/     UTXOSet, ChainComparator, LongPrivateChainRule
+                      |
+              src/miners/      HonestMiner, MaliciousMiner, Network (event queue)
+                      |
+               src/core/       Transaction, Block, Blockchain, ConsensusRule, pow
+```
+
+**How one attack trial flows:**
+
+```
+ Network clock: next block ~ Exp(600 s), finder picked by hash share
+        |
+        +-- HonestMiner     --> broadcast --> delay --> every node (own chain view)
+        |
+        '-- MaliciousMiner  --> private chain (withheld, spends the coin to itself)
+                |
+   release when: payment has N confirmations AND private chain is longer
+                |
+   honest nodes apply longest-chain + LongPrivateChainRule
+                |
+   AttackResult: success, reorg depth, private length, orphan rate, ...
+```
+
+**The defense.** `LongPrivateChainRule` flags a block that makes 6 in a row from one
+miner. **Safe Mode** then runs `ChainComparator` against the current main chain: the
+block is rejected only if its chain spends the same output as the main chain does in a
+different transaction (fraud). Otherwise it is accepted and logged as a false
+positive, so honest large miners are never blocked blindly.
+
+**Key pieces**
+
+1. **Blockchain**: a block tree with longest-chain fork choice (first seen wins ties),
+   injected `ConsensusRule`s, and `on_reorg` / `on_extend` hooks.
+2. **UTXOSet**: tracks unspent outputs and rolls back on reorgs through those hooks.
+3. **Network**: seeded discrete-event simulation with exponential block times.
+4. **SimulationRunner**: runs seeded trials over shares, confirmation depths and
+   defense on/off; trial seeds are shared by both modes so they are paired.
+
+`src/pow51sim/` is an earlier, self-contained iteration of the same idea. The pipeline
+above does not use it; it is kept for reference and still has its own tests.
+
+## 4. Running things
+
+**Tests**
+
+```bash
+pytest                      # everything
+pytest tests/core tests/miners tests/defense tests/simulation
+pytest -m integration       # end-to-end runs only
+pytest --cov                # coverage, fails below 80%
+ruff check . && black --check . && mypy src
+```
+
+**Simulation grid to CSV**
+
+```bash
+python -m src.simulation.runner --trials 100 --seed 42 --out results/results.csv
+```
+
+Columns: `scenario, attacker_share, confirmation_depth, attack_success,
+blocked_by_safe_mode, private_len, final_chain_length, reorg_depth,
+max_consecutive_by_one_miner, orphan_rate, runtime_ms, memory_mb`. `scenario` is
+`Defense OFF` or `Defense ON`. Add `--detailed` for block-ownership columns and
+`--no-memory` to skip memory tracing. `python -m simulation.runner` works too.
+
+**From Python**
+
+```python
+from simulation.attack import make_scenario
+
+result = make_scenario(attacker_share=0.5, confirmation_depth=3,
+                       defense_enabled=True, seed=1).run()
+print(result.attack_success, result.reorg_depth, result.blocked_by_safe_mode)
+```
+
+**Dashboard.** `streamlit run src/dashboard/app.py` has a sidebar for the share range,
+trials per point, confirmation depth, LPC limit, seed and focus share; four KPI cards;
+and tabs for Success Rate, Chain Race (replay one attack by seed), False Positives and
+Raw Data (CSV download). The grid runs on the real simulator (about 12 s for the default
+view, then cached). The single-race replay and the false-positive curve use a fast
+model in `src/dashboard/model.py`.
+
+**Notebook.** `notebooks/analysis.ipynb` loads (or generates) the CSVs, draws the four
+charts below and states a conclusion under each. `python scripts/generate_figures.py`
+rewrites the README images.
+
+## 5. Sample results
+
+Default run: seed 42, 100 trials per cell, 5 honest miners, LPC limit 6.
 
 **Attack success vs attacker hash share**
 
 ![Attack success rate vs attacker hash share](docs/images/success_vs_share.png)
 
-1. At 3 confirmations and 50% share, success drops from **86% to 54%** with the defense.
-2. At 6 confirmations the defense stops the attack at every share (**83% to 0%** at 50%).
-3. Below 30% share the attack rarely works, with or without the defense.
+1. At 3 confirmations and 50% share, success drops from **92% to 60%** with the defense.
+2. At 6 confirmations the defense stops every attack (**83% to 0%** at 50% share).
+3. With 1 or 3 confirmations the attacker overtakes within about 5 blocks, before the
+   6-block rule can fire, so the gain is moderate.
 
 **Final chain structure**
 
 ![Orphans, block ownership and longest streak](docs/images/chain_structure.png)
 
-1. A successful attack orphans honest blocks; orphan rate climbs past 35% at 50-60% share.
-2. Without the defense a 50% attacker owns far more than its fair share of the final
-   chain; with it, **no miner exceeds 5 consecutive blocks** (48 without it).
+1. Successful attacks orphan honest blocks (about 35-38% at 50-60% share).
+2. A 50% attacker owns about 88% of the final chain without the defense, 44% with it.
 
 **Cost of the defense**
 
 ![Runtime and memory overhead](docs/images/defense_overhead.png)
 
-1. Median runtime overhead is about **15-42%** and memory about **4-6%**.
-2. Trials are sub-millisecond, so read these as order of magnitude, not precise.
+1. Median runtime rises about **6%** and peak memory about **3%**.
+2. Trials take milliseconds, so read these as order of magnitude.
 
 **False positives**
 
-![Honest miners wrongly blocked](docs/images/false_positives.png)
+![Honest miners wrongly flagged](docs/images/false_positives.png)
 
-1. A lone honest miner has `share^(threshold-1)` of its blocks rejected (dotted line,
-   matches the simulation).
-2. At threshold 6, a 60% honest miner loses **7.7%** of its blocks; a 30% miner, 0.2%.
-3. Honest-only runs can enter Safe Mode with no attacker present.
-
-## 5. Tests, lint and CI
-
-1. `pytest --cov` runs unit and end-to-end tests (`pytest -m integration` for the
-   end-to-end ones only).
-2. `ruff check . && black --check . && mypy src` runs the static checks.
-3. **GitHub Actions** (`.github/workflows/ci.yml`) runs the same checks on Python
-   3.10-3.12 and fails below 80% coverage.
-4. `.pre-commit-config.yaml` runs the file hygiene hooks, ruff, black and mypy.
+1. Honest miners with 30-45% share are flagged in **7% to 56%** of 144-block runs.
+2. Flagged honest blocks are accepted (no conflicting spend), so the cost is an extra
+   check, not lost rewards.
 
 ## 6. Limitations
 
-1. **Simplified attack model**: one attacker, one payment, and a fork taken right
-   before the payment. The round-based scenario has no network delay; the `Network`
-   scenario has delay but no payment or merchant logic.
-2. **No real mining**: blocks are found probabilistically. There is no difficulty
-   adjustment, and selfish mining is not modeled.
-3. **Simplified chain data**: UTXO transactions have no signatures, fees or mempool,
+1. **Simplified PoW**: blocks are found probabilistically (win chance equals hash
+   share). The hash loop in `core.pow` is for tests only.
+2. **Simplified network**: a fixed-delay broadcast with no relaying, peer topology or
+   real latency, and **no difficulty adjustment**.
+3. **Simplified chain data**: transactions have no signatures, fees or mempool rules,
    and honest miners behave ideally.
-4. **Defense trade-offs**:
-   - Large honest miners are rejected at a measurable rate.
-   - A fork released in pieces can still win with 5 or fewer blocks.
-   - Safe Mode never switches off.
-   - Each node decides alone; rejections are not shared.
-5. **Results vs theory**: simulated success sits below the Nakamoto closed form,
-   partly because the attacker gives up after falling 10 blocks behind (or after 500 rounds).
-6. **Metrics**: the orphan rate counts only published blocks, and runtime and memory
-   are micro-benchmarks that vary between machines.
+4. **One attack shape**: one attacker, one payment, a fork taken right before it, and
+   release as soon as the private chain is longer and the payment is confirmed.
+5. **Honest large miners are flagged**: miners with 40% or more can legitimately mine
+   6 blocks in a row. Safe Mode avoids rejecting them, but they are still logged.
+6. **Sybil bypass (future work)**: an attacker who splits its hash power across several
+   identities never produces 6 consecutive blocks from one miner, so this rule does not
+   see it.
+7. **Late detection**: a private chain that overtakes within 5 blocks completes before
+   the rule triggers, so shallow confirmation depths are only partly protected.
+8. **Metrics**: orphan rate counts only published blocks, and runtime and memory are
+   micro-benchmarks that vary between machines.

@@ -1,40 +1,41 @@
 # pow-51-sim
 
-Simulation of a **51% double-spend attack** on a proof-of-work chain.
+Simulation of a **51% double-spend attack** on a proof-of-work chain and of the
+long-private-chain (LPC) defense with Safe Mode.
 
 ## Layout
 
 ```
-src/pow51sim/
-  core/        Transaction, Block, ProofOfWork, UTXOSet (follows reorgs via ChainListener),
-               Blockchain (block tree, longest chain),
-               ConsensusRule + built-in rules (integrity, linkage, timestamp, PoW, UTXO)
-  miners/      Miner (ABC), HonestMiner, MaliciousMiner (private fork), BlockReceiver, winner selection
-  defense/     MaxReorgDepthRule, LongPrivateChainRule (+ Safe Mode) as ConsensusRules,
-               build_rules, confirmation check,
-               ChainComparator (flags conflicting spends between two chains)
-  simulation/  Network (discrete-event, seedable), latency models, build_network,
-               AttackConfig, AttackScenario (UTXO double-spend race), sweep (aggregated),
-               SimulationRunner (per-trial grid -> DataFrame/CSV),
-               FalsePositiveExperiment (honest-only network vs the run limit)
-  analysis/    tables, plots (defense_plots.py + style.py), Nakamoto and
-               false-positive closed forms, chain metrics
-tests/         mirrors src/ one test module per unit
-notebooks/     analysis only; no logic lives here (plots and tables come from analysis/)
-               defense_evaluation.ipynb needs `pip install -e ".[notebook]"`
+src/core/        Transaction, Block, Blockchain (block tree, longest chain, on_reorg /
+                 on_extend hooks), ConsensusRule + BasicRule, pow (test-only hash loop)
+src/miners/      Miner (ABC), HonestMiner, MaliciousMiner (private-chain building
+                 blocks only), Network (seeded discrete-event simulation)
+src/defense/     UTXOSet, ChainComparator, LongPrivateChainRule + SafeModeStats
+src/simulation/  attack (AttackScenario, make_scenario), runner (grid -> CSV, CLI),
+                 false_positives, plots, seeding
+src/dashboard/   Streamlit app: engine.py (run_grid on the real runner), model.py (fast
+                 replay + exact curves), views.py (figures/HTML), app.py (wiring)
+src/pow51sim/    earlier standalone iteration; not used by the pipeline above
+tests/           mirrors src/ (tests/core, miners, defense, simulation, dashboard tests)
+notebooks/       analysis.ipynb (current); others belong to pow51sim
+scripts/         generate_figures.py, run_demo.py (pow51sim)
 ```
 
 ## Commands
 
-1. Setup: `pip install -r requirements.txt && pip install -e ".[dev]"`
+1. Setup: `pip install -r requirements.txt && pip install -e ".[dev,notebook]"`
 2. Hooks: `pre-commit install`
 3. Lint: `ruff check . && black --check . && mypy src`
-4. Test with the 80% coverage gate: `pytest --cov` (end-to-end tests: `pytest -m integration`)
+4. Test with the 80% coverage gate: `pytest --cov` (end-to-end only: `pytest -m integration`)
+5. Grid: `python -m src.simulation.runner --trials 100 --seed 42`
+6. Dashboard: `streamlit run src/dashboard/app.py`
 
 ## Conventions
 
-1. **Dependencies point inward**: `core` knows nothing else; `simulation` composes everything.
-2. **Inject randomness** (`Chooser`) so tests can script outcomes.
-3. **New validation or defenses** implement `ConsensusRule` and are passed to `Blockchain(rules=...)`; no engine changes.
+1. **Dependencies point down**: core <- miners <- defense <- simulation <- dashboard.
+2. **Inject, don't hard-code**: rules go into `Blockchain(rules=...)`, miners into
+   `Network`; the LPC rule needs `attach(blockchain)` (see `defense.lpc.build_chain`).
+3. **Seed everything**: derive trial seeds with `simulation.seeding.derive_seed`; never
+   use global randomness.
 4. Keep comments minimal; prefer clear names.
-5. Every new unit gets a test in `tests/`. CI runs ruff, black, mypy, pytest.
+5. Every new unit gets a test in `tests/`. CI runs ruff, black, mypy, pytest --cov.

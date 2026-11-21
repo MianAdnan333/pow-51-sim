@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Proof-of-work 51% attack (double-spend) simulation"
 requires-python = ">=3.10"
 dependencies = [
+    "numpy>=1.24",
     "pandas>=2.0",
+    "streamlit>=1.50",
+    "plotly>=5.20",
     "matplotlib>=3.7",
     "seaborn>=0.13",
 ]
@@ -38,7 +41,7 @@ pythonpath = ["src"]
 markers = ["integration: small end-to-end simulations"]
 
 [tool.coverage.run]
-source = ["pow51sim"]
+source = ["pow51sim", "dashboard", "core", "miners", "defense", "simulation"]
 branch = true
 
 [tool.coverage.report]
@@ -68,5 +71,5 @@ python_version = "3.10"
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["matplotlib.*", "seaborn.*"]
+module = ["matplotlib.*", "seaborn.*", "plotly.*", "streamlit.*"]
 ignore_missing_imports = true
